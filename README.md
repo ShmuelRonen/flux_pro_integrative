@@ -7,7 +7,8 @@ If you find this project helpful, consider buying me a coffee:
 
 A completely rewritten and enhanced custom node for ComfyUI that integrates with [Black Forest Labs](https://blackforestlabs.ai/) FLUX API, providing seamless access to FLUX's image generation and finetuning capabilities with improved reliability and user experience.
 
-<img width="1395" height="779" alt="image" src="https://github.com/user-attachments/assets/abd90ab2-cd6e-4354-9967-f9d156f83456" />
+<img width="1295" height="826" alt="image" src="https://github.com/user-attachments/assets/a5d41d30-da67-426f-93f3-ee5ac18b1d94" />
+
 
 
 ## ✨ What's New in v2.0
