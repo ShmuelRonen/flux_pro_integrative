@@ -125,41 +125,84 @@ class FluxAPIClient:
         except Exception as e:
             raise FluxAPIError(f"Unexpected error: {str(e)}")
 
-    def generate_image(self, prompt: str, **params) -> str:
-        """Generate image and return task ID"""
-        if params.get('ultra_mode', True):
-            endpoint = "flux-pro-1.1-ultra"
-            payload = {
-                "prompt": prompt,
-                "aspect_ratio": params.get('aspect_ratio', '16:9'),
-                "safety_tolerance": params.get('safety_tolerance', 6),
-                "output_format": params.get('output_format', 'png'),
-                "raw": params.get('raw', False)
-            }
+    def generate_image(self, prompt: str, **params) -> Tuple[str, Optional[str]]:
+        """Generate image and return task ID and polling URL (if available)"""
+        image_prompt = params.get('image_prompt')
+        
+        if image_prompt is not None:
+            # Convert image tensor to base64 for API
+            image_b64 = self._tensor_to_base64(image_prompt)
+            
+            if params.get('ultra_mode', True):
+                endpoint = "flux-pro-1.1-ultra"
+                payload = {
+                    "prompt": prompt,
+                    "image_prompt": image_b64,  # Correct parameter name
+                    "image_prompt_strength": params.get('image_prompt_strength', 0.5),
+                    "aspect_ratio": params.get('aspect_ratio', '16:9'),
+                    "safety_tolerance": params.get('safety_tolerance', 6),
+                    "output_format": params.get('output_format', 'png'),
+                    "raw": params.get('raw', False)
+                }
+            else:
+                endpoint = "flux-pro-1.1"
+                width, height = self._get_dimensions_from_ratio(params.get('aspect_ratio', '16:9'))
+                payload = {
+                    "prompt": prompt,
+                    "image_prompt": image_b64,  # Correct parameter name
+                    "image_prompt_strength": params.get('image_prompt_strength', 0.5),
+                    "width": width,
+                    "height": height,
+                    "safety_tolerance": params.get('safety_tolerance', 6),
+                    "output_format": params.get('output_format', 'png')
+                }
         else:
-            endpoint = "flux-pro-1.1"
-            width, height = self._get_dimensions_from_ratio(params.get('aspect_ratio', '16:9'))
-            payload = {
-                "prompt": prompt,
-                "width": width,
-                "height": height,
-                "safety_tolerance": params.get('safety_tolerance', 6),
-                "output_format": params.get('output_format', 'png')
-            }
+            # Original text-only generation
+            if params.get('ultra_mode', True):
+                endpoint = "flux-pro-1.1-ultra"
+                payload = {
+                    "prompt": prompt,
+                    "aspect_ratio": params.get('aspect_ratio', '16:9'),
+                    "safety_tolerance": params.get('safety_tolerance', 6),
+                    "output_format": params.get('output_format', 'png'),
+                    "raw": params.get('raw', False)
+                }
+            else:
+                endpoint = "flux-pro-1.1"
+                width, height = self._get_dimensions_from_ratio(params.get('aspect_ratio', '16:9'))
+                payload = {
+                    "prompt": prompt,
+                    "width": width,
+                    "height": height,
+                    "safety_tolerance": params.get('safety_tolerance', 6),
+                    "output_format": params.get('output_format', 'png')
+                }
         
         if params.get('seed', -1) != -1:
             payload["seed"] = params['seed']
         
         print(f"[Flux Pro] Sending generation request to {endpoint}")
-        response = self._make_request("POST", endpoint, json=payload)
+        if image_prompt is not None:
+            print(f"[Flux Pro] Using image prompt with strength {params.get('image_prompt_strength', 0.5)}")
         
+        response = self._make_request("POST", endpoint, json=payload)
         result = response.json()
+        
+        print(f"[Flux Pro DEBUG] Full API Response: {result}")
+        
         task_id = result.get("id")
+        polling_url = result.get("polling_url")
+        
         if not task_id:
             raise FluxAPIError("No task ID received from server")
         
         print(f"[Flux Pro] Task created: {task_id}")
-        return task_id
+        if polling_url:
+            print(f"[Flux Pro] Polling URL: {polling_url}")
+        else:
+            print(f"[Flux Pro] No polling URL received, will use fallback method")
+        
+        return task_id, polling_url
 
     def create_finetune(self, zip_path: str, **params) -> str:
         """Create finetune job"""
@@ -196,8 +239,8 @@ class FluxAPIClient:
         print(f"[Flux Pro] Finetune created: {finetune_id}")
         return finetune_id
 
-    def generate_with_finetune(self, finetune_id: str, prompt: str, **params) -> str:
-        """Generate image using finetune"""
+    def generate_with_finetune(self, finetune_id: str, prompt: str, **params) -> Tuple[str, Optional[str]]:
+        """Generate image using finetune and return task ID and polling URL"""
         ultra_mode = params.get('ultra_mode', True)
         endpoint = "flux-pro-1.1-ultra-finetuned" if ultra_mode else "flux-pro-finetuned"
         
@@ -206,6 +249,12 @@ class FluxAPIClient:
             "prompt": prompt,
             "finetune_strength": params.get('finetune_strength', 1.2)
         }
+        
+        # Add image prompt support for finetuned models
+        image_prompt = params.get('image_prompt')
+        if image_prompt is not None:
+            payload["image_prompt"] = self._tensor_to_base64(image_prompt)
+            payload["image_prompt_strength"] = params.get('image_prompt_strength', 0.5)
         
         # Add format-specific parameters
         if ultra_mode:
@@ -228,49 +277,103 @@ class FluxAPIClient:
             payload["seed"] = params['seed']
         
         print(f"[Flux Pro] Generating with finetune: {finetune_id}")
-        response = self._make_request("POST", endpoint, json=payload)
+        if image_prompt is not None:
+            print(f"[Flux Pro] Using image prompt with finetune, strength: {params.get('image_prompt_strength', 0.5)}")
         
+        response = self._make_request("POST", endpoint, json=payload)
         result = response.json()
+        
         task_id = result.get("id")
+        polling_url = result.get("polling_url")
+        
         if not task_id:
             raise FluxAPIError("No task ID received for finetune inference")
         
-        return task_id
+        print(f"[Flux Pro] Finetune task created: {task_id}")
+        return task_id, polling_url
 
-    def get_result(self, task_id: str, output_format: str = 'png') -> torch.Tensor:
-        """Poll for result and return image tensor"""
+    def get_result(self, task_id: str, polling_url: Optional[str] = None, output_format: str = 'png') -> torch.Tensor:
+        """Poll for result using polling URL or fallback methods"""
+        
         for attempt in range(1, self.MAX_RETRIES + 1):
             wait_time = min(2 ** attempt + 5, 30)
             print(f"[Flux Pro] Attempt {attempt}/{self.MAX_RETRIES} - waiting {wait_time}s")
             time.sleep(wait_time)
             
-            try:
-                response = self._make_request("GET", f"get_result?id={task_id}")
-                result = response.json()
-                status = result.get("status")
-                
-                if status == TaskStatus.READY.value:
-                    sample_url = result.get('result', {}).get('sample')
-                    if not sample_url:
-                        raise FluxAPIError("No sample URL in response")
+            # Try polling URL first if available
+            if polling_url:
+                try:
+                    print(f"[Flux Pro DEBUG] Using polling URL: {polling_url}")
                     
-                    return self._download_image(sample_url, output_format)
+                    # Make direct request to polling URL
+                    response = requests.get(polling_url, headers={"X-Key": self.api_key}, timeout=self.TIMEOUT)
+                    response.raise_for_status()
+                    result = response.json()
+                    
+                    print(f"[Flux Pro DEBUG] Polling response: {result}")
+                    
+                    status = result.get("status")
+                    
+                    if status == TaskStatus.READY.value:
+                        sample_url = result.get('result', {}).get('sample')
+                        if not sample_url:
+                            raise FluxAPIError("No sample URL in response")
+                        return self._download_image(sample_url, output_format)
+                    
+                    elif status == TaskStatus.ERROR.value:
+                        error_msg = result.get('result', {}).get('error', 'Unknown error')
+                        raise FluxAPIError(f"Generation failed: {error_msg}")
+                    
+                    elif status == TaskStatus.PENDING.value:
+                        print(f"[Flux Pro] Status: {status} - retrying...")
+                        continue
+                    
+                    else:
+                        raise FluxAPIError(f"Unexpected status: {status}")
+                        
+                except Exception as e:
+                    print(f"[Flux Pro] Polling URL failed: {str(e)}")
+                    polling_url = None  # Fall back to old method
+            
+            # Fallback to old method if polling URL fails or not available
+            if not polling_url:
+                fallback_endpoints = [
+                    f"get_result?id={task_id}",
+                    f"result/{task_id}",
+                    f"tasks/{task_id}"
+                ]
                 
-                elif status == TaskStatus.ERROR.value:
-                    error_msg = result.get('result', {}).get('error', 'Unknown error')
-                    raise FluxAPIError(f"Generation failed: {error_msg}")
-                
-                elif status != TaskStatus.PENDING.value:
-                    raise FluxAPIError(f"Unexpected status: {status}")
-                
-                print(f"[Flux Pro] Status: {status} - retrying...")
-                
-            except FluxAPIError:
-                raise
-            except Exception as e:
-                if attempt == self.MAX_RETRIES:
-                    raise FluxAPIError(f"Failed to get result after {self.MAX_RETRIES} attempts: {str(e)}")
-                print(f"[Flux Pro] Error on attempt {attempt}: {str(e)}")
+                for endpoint in fallback_endpoints:
+                    try:
+                        print(f"[Flux Pro DEBUG] Trying fallback endpoint: {self.BASE_URL}/{endpoint}")
+                        response = self._make_request("GET", endpoint)
+                        result = response.json()
+                        
+                        status = result.get("status")
+                        
+                        if status == TaskStatus.READY.value:
+                            sample_url = result.get('result', {}).get('sample')
+                            if not sample_url:
+                                raise FluxAPIError("No sample URL in response")
+                            return self._download_image(sample_url, output_format)
+                        
+                        elif status == TaskStatus.ERROR.value:
+                            error_msg = result.get('result', {}).get('error', 'Unknown error')
+                            raise FluxAPIError(f"Generation failed: {error_msg}")
+                        
+                        elif status == TaskStatus.PENDING.value:
+                            print(f"[Flux Pro] Status: {status} - retrying...")
+                            break  # Try again on next attempt
+                        
+                        else:
+                            continue  # Try next endpoint
+                            
+                    except FluxAPIError as e:
+                        if "404" in str(e):
+                            continue  # Try next endpoint
+                        raise e
+                    except Exception as e:
+                        continue  # Try next endpoint
         
         raise FluxAPIError(f"Task {task_id} did not complete within {self.MAX_RETRIES} attempts")
 
@@ -294,6 +397,28 @@ class FluxAPIClient:
                 
         except Exception as e:
             raise FluxAPIError(f"Failed to download image: {str(e)}")
+
+    def _tensor_to_base64(self, tensor: torch.Tensor) -> str:
+        """Convert tensor to base64 encoded image"""
+        try:
+            # Convert tensor to PIL Image
+            if tensor.dim() == 4:
+                tensor = tensor.squeeze(0)  # Remove batch dimension
+            
+            # Convert from [0,1] to [0,255]
+            img_array = (tensor.cpu().numpy() * 255).astype(np.uint8)
+            img = Image.fromarray(img_array)
+            
+            # Convert to base64
+            with io.BytesIO() as buffer:
+                img.save(buffer, format='PNG')
+                buffer.seek(0)
+                img_b64 = base64.b64encode(buffer.read()).decode('utf-8')
+                
+            return img_b64
+            
+        except Exception as e:
+            raise FluxAPIError(f"Failed to convert image to base64: {str(e)}")
 
     @staticmethod
     def _get_dimensions_from_ratio(aspect_ratio: str) -> Tuple[int, int]:
@@ -347,6 +472,18 @@ class FluxProIntegrative:
                 "api_key": ("STRING", {
                     "default": "",
                     "tooltip": "BFL API Key (optional - can use config.ini instead)"
+                }),
+                
+                # Image input for prompting
+                "image_prompt": ("IMAGE", {
+                    "tooltip": "Input image for image-to-image generation or style reference"
+                }),
+                "image_prompt_strength": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.1,
+                    "max": 1.0,
+                    "step": 0.1,
+                    "tooltip": "Strength of image prompt influence (0.1=weak, 1.0=strong)"
                 }),
                 
                 # Generation settings
@@ -431,7 +568,7 @@ class FluxProIntegrative:
     FUNCTION = "process"
     CATEGORY = "BFL/Flux Pro"
 
-    def process(self, mode: str, prompt: str, api_key: str = "", **kwargs) -> Tuple[torch.Tensor, str]:
+    def process(self, mode: str, prompt: str, api_key: str = "", image_prompt=None, **kwargs) -> Tuple[torch.Tensor, str]:
         """Main processing function"""
         try:
             # Use API key from input if provided, otherwise use config
@@ -441,6 +578,10 @@ class FluxProIntegrative:
                 self._initialize(effective_api_key)
                 if not self.api_client:
                     return self._create_error_output("Node not properly initialized. Check config.ini or provide API key")
+
+            # Add image_prompt to kwargs if provided
+            if image_prompt is not None:
+                kwargs['image_prompt'] = image_prompt
 
             if mode == "generate":
                 return self._handle_generate(prompt, **kwargs)
@@ -463,12 +604,20 @@ class FluxProIntegrative:
         if not prompt.strip():
             return self._create_error_output("Prompt cannot be empty")
 
-        print(f"[Flux Pro] Generating image with prompt: {prompt[:100]}...")
+        has_image_prompt = kwargs.get('image_prompt') is not None
+        prompt_info = f"{prompt[:100]}..." if len(prompt) > 100 else prompt
         
-        task_id = self.api_client.generate_image(prompt, **kwargs)
-        image_tensor = self.api_client.get_result(task_id, kwargs.get('output_format', 'png'))
+        if has_image_prompt:
+            print(f"[Flux Pro] Generating with image prompt and text: {prompt_info}")
+        else:
+            print(f"[Flux Pro] Generating image with prompt: {prompt_info}")
         
-        info = f"Generated successfully\nTask ID: {task_id}\nPrompt: {prompt[:100]}..."
+        task_id, polling_url = self.api_client.generate_image(prompt, **kwargs)
+        image_tensor = self.api_client.get_result(task_id, polling_url, kwargs.get('output_format', 'png'))
+        
+        mode_info = "with image prompt" if has_image_prompt else "text-only"
+        info = f"Generated successfully ({mode_info})\nTask ID: {task_id}\nPrompt: {prompt_info}"
+        
         return (image_tensor, info)
 
     def _handle_finetune(self, **kwargs) -> Tuple[torch.Tensor, str]:
@@ -511,15 +660,22 @@ class FluxProIntegrative:
         if not prompt.strip():
             return self._create_error_output("Prompt cannot be empty")
 
-        print(f"[Flux Pro] Generating with finetune {finetune_id}")
+        has_image_prompt = kwargs.get('image_prompt') is not None
+        prompt_info = f"{prompt[:100]}..." if len(prompt) > 100 else prompt
         
-        task_id = self.api_client.generate_with_finetune(finetune_id, prompt, **kwargs)
-        image_tensor = self.api_client.get_result(task_id, kwargs.get('output_format', 'png'))
+        if has_image_prompt:
+            print(f"[Flux Pro] Generating with finetune {finetune_id}, image prompt, and text: {prompt_info}")
+        else:
+            print(f"[Flux Pro] Generating with finetune {finetune_id} and prompt: {prompt_info}")
         
-        info = (f"Generated with finetune successfully\n"
+        task_id, polling_url = self.api_client.generate_with_finetune(finetune_id, prompt, **kwargs)
+        image_tensor = self.api_client.get_result(task_id, polling_url, kwargs.get('output_format', 'png'))
+        
+        mode_info = "with image prompt" if has_image_prompt else "text-only"
+        info = (f"Generated with finetune successfully ({mode_info})\n"
                 f"Finetune ID: {finetune_id}\n"
                 f"Task ID: {task_id}\n"
-                f"Prompt: {prompt[:100]}...")
+                f"Prompt: {prompt_info}")
         
         return (image_tensor, info)
 
